@@ -29,6 +29,17 @@ type (
 		fieldPtr interface{}
 		rules    []Rule
 	}
+
+	// RulesFunc is how validateStructFunc differs from validateStruct. Instead of
+	// a fixed set of rules, the RulesFunc can determine which rules to includes
+	// based on characteristics of the struct field.
+	RulesFunc func(reflect.StructField) []Rule
+
+	// FieldRulesFunc represents a rules func associated with a struct field.
+	FieldRulesFunc struct {
+		fieldPtr  interface{}
+		rulesFunc RulesFunc
+	}
 )
 
 // Error returns the error string of ErrFieldPointer.
@@ -39,6 +50,124 @@ func (e ErrFieldPointer) Error() string {
 // Error returns the error string of ErrFieldNotFound.
 func (e ErrFieldNotFound) Error() string {
 	return fmt.Sprintf("field #%v cannot be found in the struct", int(e))
+}
+
+// ValidateStructFunc is similar to ValidateStruct, only instead of validating a
+// struct by checking the specified struct fields against fixed corresponding
+// validation rules, it instead allows the caller to pass in a closure that
+// accepts the struct field which determines which rules to run (return).
+//
+// Note that the struct being validated must be specified as a pointer to it. If
+// the pointer is nil, it is considered valid. Use FieldFunc() to specify struct
+// fields that need to be validated. Each FieldFunc() call specifies a single
+// field which should be specified as a pointer to the field. A field can be
+// associated with multiple rules as determined the the provided RulesFunc().
+//
+// As a trivial example,
+//
+//    func BoolFn(b bool, rules ...validation.Rule) validation.RulesFunc {
+//    	return func(sf reflect.StructField) []validation.Rule {
+//    		if b {
+//    			return rules
+//    		}
+//    		return nil
+//    	}
+//    }
+//
+//    include := true // variable gotten from eleswhere
+//
+//    value := struct {
+//        Name  string
+//        Value string
+//    }{"name", "demo"}
+//    err := validation.ValidateStructFunc(&value,
+//         validation.FieldFunc(&a.Name, BoolFn(include, validation.Required),
+//         validation.FieldWrapper(&a.Value, validation.Required, validation.Length(5, 10)),
+//    )
+//    fmt.Println(err)
+//    // Value: the length must be between 5 and 10.
+//
+// An error will be returned if validation fails.
+func ValidateStructFunc(structPtr interface{}, fieldRulesFuncs ...*FieldRulesFunc) error {
+	return validateStructFunc(nil, structPtr, fieldRulesFuncs...)
+}
+
+// ValidateStructFuncWithContext validates a struct with the given context.
+// This is the ValidateStructFunc version of ValidateStructWithContext and has
+// the same differences.
+func ValidateStructFuncWithContext(ctx context.Context, structPtr interface{}, fieldRulesFuncs ...*FieldRulesFunc) error {
+	return validateStructFunc(ctx, structPtr, fieldRulesFuncs...)
+}
+
+func validateStructFunc(ctx context.Context, structPtr interface{}, fieldRulesFuncs ...*FieldRulesFunc) error {
+	value := reflect.ValueOf(structPtr)
+	if value.Kind() != reflect.Ptr || !value.IsNil() && value.Elem().Kind() != reflect.Struct {
+		// must be a pointer to a struct
+		return NewInternalError(ErrStructPointer)
+	}
+	if value.IsNil() {
+		// treat a nil struct pointer as valid
+		return nil
+	}
+	value = value.Elem()
+
+	errs := Errors{}
+
+	for i, frf := range fieldRulesFuncs {
+		fv := reflect.ValueOf(frf.fieldPtr)
+		if fv.Kind() != reflect.Ptr {
+			return NewInternalError(ErrFieldPointer(i))
+		}
+		ft := findStructField(value, fv)
+		if ft == nil {
+			return NewInternalError(ErrFieldNotFound(i))
+		}
+
+		rules := frf.rulesFunc(*ft)
+
+		var err error
+		if ctx == nil {
+			err = Validate(fv.Elem().Interface(), rules...)
+		} else {
+			err = ValidateWithContext(ctx, fv.Elem().Interface(), rules...)
+		}
+		if err != nil {
+			if ie, ok := err.(InternalError); ok && ie.InternalError() != nil {
+				return err
+			}
+			if ft.Anonymous {
+				// merge errors from anonymous struct field
+				if es, ok := err.(Errors); ok {
+					for name, value := range es {
+						errs[name] = value
+					}
+					continue
+				}
+			}
+			errs[getErrorFieldName(ft)] = err
+		}
+	}
+
+	if len(errs) > 0 {
+		return errs
+	}
+	return nil
+}
+
+// FieldFunc specifies a struct field and the corresponding validation rules.
+// The struct field must be specified as a pointer to it.
+func FieldFunc(fieldPtr interface{}, f RulesFunc) *FieldRulesFunc {
+	return &FieldRulesFunc{
+		fieldPtr:  fieldPtr,
+		rulesFunc: f,
+	}
+}
+
+func FieldWrapper(fieldPtr interface{}, rules ...Rule) *FieldRulesFunc {
+	return &FieldRulesFunc{
+		fieldPtr:  fieldPtr,
+		rulesFunc: func(sf reflect.StructField) []Rule { return rules },
+	}
 }
 
 // ValidateStruct validates a struct by checking the specified struct fields against the corresponding validation rules.
