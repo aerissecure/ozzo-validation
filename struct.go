@@ -163,6 +163,10 @@ func FieldFunc(fieldPtr interface{}, f RulesFunc) *FieldRulesFunc {
 	}
 }
 
+// FieldWrapper provides the same functionality for ValidateStructFunc() as
+// Field() provides to ValidateStruct(), namely to associate rules directly with
+// a struct field. Use this when ValidateStructFunc() is required, but the
+// particular field doesn't need the RulesFunc functionality.
 func FieldWrapper(fieldPtr interface{}, rules ...Rule) *FieldRulesFunc {
 	return &FieldRulesFunc{
 		fieldPtr:  fieldPtr,
